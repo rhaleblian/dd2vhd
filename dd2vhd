@@ -1,0 +1,104 @@
+﻿#!/usr/bin/env python3
+
+import argparse
+import datetime
+import os
+import uuid
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument('path', type=str, help='path to process')
+parser.add_argument('--undo', action='store_true', help='restore original image')
+args = parser.parse_args()
+
+assert os.path.isfile(args.path)
+
+cookie = 'conectix'
+format_version = 0x10000
+creator = 'dd2v'
+creator_version = 42
+creator_host_os = 0x5769326b # Windows
+
+def check_vhd(path):
+    with open(path, 'rb') as input_file:
+        input_file.seek(0, 2)
+        size = input_file.tell()
+        if size < 511:
+            return False
+        input_file.seek(max(0, size-512))
+        footer = input_file.read(512)
+        maybe_cookie = footer[:8].decode().split('\x00')[0]
+        if maybe_cookie == cookie:
+            return 512
+        maybe_cookie = footer[1:9].decode().split('\x00')[0]
+        if maybe_cookie == cookie:
+            return 511
+        return False
+
+def get_timestamp():
+    base = datetime.datetime(2000, 1, 1)
+    return int((datetime.datetime.now() - base).total_seconds())
+
+def get_geometry(size):
+    totalSectors = (size + 511) // 512
+    if totalSectors > 65535 * 16 * 255:
+        totalSectors = 65535 * 16 * 255
+    if totalSectors >= 65535 * 16 * 63:
+        sectorsPerTrack = 255
+        heads = 16
+        cylinderTimesHeads = totalSectors // sectorsPerTrack
+    else:
+        sectorsPerTrack = 17
+        cylinderTimesHeads = totalSectors // sectorsPerTrack
+        heads = (cylinderTimesHeads + 1023) // 1024;
+        if heads < 4:
+            heads = 4
+        if cylinderTimesHeads >= (heads * 1024) or heads > 16:
+            sectorsPerTrack = 31
+            heads = 16
+            cylinderTimesHeads = totalSectors // sectorsPerTrack
+        if cylinderTimesHeads >= (heads * 1024):
+            sectorsPerTrack = 63
+            heads = 16
+            cylinderTimesHeads = totalSectors // sectorsPerTrack
+    cylinders = cylinderTimesHeads // heads
+    return (cylinders & 0xffff) + ((heads & 0xff) << 16) + ((sectorsPerTrack & 0xff) << 24)
+
+def convert(path):
+    size = os.path.getsize(path)
+    footer = bytearray(b'\x00'*512)
+    footer[0:8] = (cookie.encode() + b'\x00'*8)[:8]
+    footer[0x8:0x0c] = int(0).to_bytes(4, byteorder='big') # Features.
+    footer[0x0c:0x10] = format_version.to_bytes(4, byteorder='big')
+    footer[0x10:0x18] = 0xffffffffffffffff.to_bytes(8, byteorder='big')
+    footer[0x18:0x1c] = get_timestamp().to_bytes(4, byteorder='big')
+    footer[0x1c:0x20] = (creator.encode() + b'\x00'*4)[:4]
+    footer[0x20:0x24] = creator_version.to_bytes(4, byteorder='big')
+    footer[0x24:0x28] = creator_host_os.to_bytes(4, byteorder='big')
+    footer[0x28:0x30] = size.to_bytes(8, byteorder='big')
+    footer[0x30:0x38] = size.to_bytes(8, byteorder='big')
+    footer[0x38:0x3c] = get_geometry(size).to_bytes(4, byteorder='big')
+    footer[0x3c:0x40] = int(2).to_bytes(4, byteorder='big') # Disk type.
+    footer[0x44:0x54] = uuid.uuid1().bytes
+    footer[0x40:0x44] = (~sum(footer)).to_bytes(4, byteorder='big', signed=True)
+    footer[0x54] = 0 # No saved state.
+    assert 0x55+427 == 512
+    with open(path, 'ab') as output_file:
+        output_file.write(footer)
+
+if args.undo:
+    size = check_vhd(args.path)
+    if size:
+        with open(args.path, 'r+b') as my_file:
+            my_file.seek(0, 2)
+            my_file.truncate(my_file.tell() - size)
+        if args.path.endswith('.vhd') and len(args.path) > 4:
+            os.rename(args.path, args.path[:-4])
+    else:
+        print('Already unconverted. Bye!')
+else:
+    if check_vhd(args.path):
+        print('Already converted. Bye!')
+    else:
+        convert(args.path)
+        os.rename(args.path, '{}.vhd'.format(args.path))
