@@ -9,6 +9,7 @@ import uuid
 parser = argparse.ArgumentParser()
 parser.add_argument('path', type=str, help='path to process')
 parser.add_argument('--undo', action='store_true', help='restore original image')
+parser.add_argument('--chs', nargs=3, help='cylinders heads sectorsperhead')
 args = parser.parse_args()
 
 assert os.path.isfile(args.path)
@@ -39,7 +40,7 @@ def get_timestamp():
     base = datetime.datetime(2000, 1, 1)
     return int((datetime.datetime.now() - base).total_seconds())
 
-def get_geometry(size):
+def infer_geometry(size):
     totalSectors = (size + 511) // 512
     if totalSectors > 65535 * 16 * 255:
         totalSectors = 65535 * 16 * 255
@@ -62,9 +63,12 @@ def get_geometry(size):
             heads = 16
             cylinderTimesHeads = totalSectors // sectorsPerTrack
     cylinders = cylinderTimesHeads // heads
+    return get_geometry(cylinders, heads, sectorsPerTrack)
+
+def get_geometry(cylinders, heads, sectorsPerTrack):
     return (cylinders & 0xffff) + ((heads & 0xff) << 16) + ((sectorsPerTrack & 0xff) << 24)
 
-def convert(path):
+def convert(path, chs=None):
     size = os.path.getsize(path)
     footer = bytearray(b'\x00'*512)
     footer[0:8] = (cookie.encode() + b'\x00'*8)[:8]
@@ -77,7 +81,10 @@ def convert(path):
     footer[0x24:0x28] = creator_host_os.to_bytes(4, byteorder='big')
     footer[0x28:0x30] = size.to_bytes(8, byteorder='big')
     footer[0x30:0x38] = size.to_bytes(8, byteorder='big')
-    footer[0x38:0x3c] = get_geometry(size).to_bytes(4, byteorder='big')
+    if chs:
+        footer[0x38:0x3c] = get_geometry(chs[0], chs[1], chs[2]).to_bytes(4, byteorder='big')
+    else:
+        footer[0x38:0x3c] = infer_geometry(size).to_bytes(4, byteorder='big')
     footer[0x3c:0x40] = int(2).to_bytes(4, byteorder='big') # Disk type.
     footer[0x44:0x54] = uuid.uuid1().bytes
     footer[0x40:0x44] = (~sum(footer)).to_bytes(4, byteorder='big', signed=True)
@@ -100,5 +107,5 @@ else:
     if check_vhd(args.path):
         print('Already converted. Bye!')
     else:
-        convert(args.path)
+        convert(args.path, args.chs)
         os.rename(args.path, '{}.vhd'.format(args.path))
